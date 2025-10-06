@@ -1,1 +1,1 @@
-# stock-analytics-team
+# Stock Analytics Project 
