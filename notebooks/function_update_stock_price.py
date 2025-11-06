@@ -1,20 +1,33 @@
-import pandas as pd
 from datetime import datetime, timedelta
-from vnstock import Vnstock
+import pandas as pd
+from vnstock import Vnstock, Listing
 from sqlalchemy import create_engine, text
 
-# Thiết lập kết nối PostgreSQL
+# ======================
+# CONFIG
+# ======================
 user = "postgres"
 password = "postgres"
 host = "localhost"
 port = "5432"
 database = "stockdb"
-table_name = "stock_prices"
+table_name = "once_time_stock"
 
 conn_str = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{database}"
-engine = create_engine(conn_str)
 
-# Hàm cập nhật dữ liệu cho 1 mã
+# ======================
+# FUNCTION
+# ======================
+
+def get_all_symbols_today():
+    """Lấy danh sách mã cổ phiếu đang giao dịch."""
+    lst = Listing(source="vci")
+    df_listed = lst.all_symbols(to_df=True)
+    symbols = df_listed["symbol"].dropna().unique().tolist()
+    print(f"📈 Phát hiện {len(symbols)} mã cổ phiếu hiện có trên thị trường.")
+    return symbols
+
+
 def update_stock_price_nearest_to_postgres(symbol, table_name, engine):
     """Cập nhật dữ liệu cổ phiếu mới nhất cho 1 mã từ vnstock vào PostgreSQL."""
     try:
@@ -24,61 +37,53 @@ def update_stock_price_nearest_to_postgres(symbol, table_name, engine):
         if not df_old.empty and 'time' in df_old.columns:
             df_old['time'] = pd.to_datetime(df_old['time'])
             last_date = df_old['time'].max()
-            print(f"📅 {symbol}: dữ liệu hiện có đến {last_date.date()}")
             start_date = (last_date + timedelta(days=1)).strftime('%Y-%m-%d')
         else:
-            print(f"⚠️ {symbol}: chưa có dữ liệu trong bảng {table_name}, sẽ tải toàn bộ mới.")
             start_date = '2024-01-01'
 
-        # Lấy dữ liệu mới nhất từ vnstock
         stock = Vnstock().stock(symbol=symbol, source='VCI')
-        df_latest_check = stock.quote.history(start='2024-01-01', end=datetime.today().strftime('%Y-%m-%d'))
-
-        if df_latest_check.empty:
-            print(f"❌ {symbol}: không lấy được dữ liệu từ vnstock.")
-            return
-
-        newest_date = df_latest_check['time'].max().date()
-        print(f"🕒 {symbol}: ngày giao dịch mới nhất trên vnstock là {newest_date}")
-
-        if not df_old.empty and last_date.date() >= newest_date:
-            print(f"✅ {symbol}: dữ liệu đã cập nhật mới nhất (đến {last_date.date()}).")
-            return
-
-        # Lấy dữ liệu mới
-        df_new = stock.quote.history(start=start_date, end=str(newest_date))
+        df_new = stock.quote.history(
+            start=start_date,
+            end=datetime.today().strftime('%Y-%m-%d')
+        )
 
         if df_new.empty:
-            print(f"✅ {symbol}: không có dữ liệu mới cần cập nhật.")
+            print(f"✅ {symbol}: không có dữ liệu mới.")
             return
 
         df_new['symbol'] = symbol
-
-        # Loại bỏ dòng trùng (nếu có)
-        if not df_old.empty:
-            df_new = df_new[~df_new['time'].isin(df_old['time'])]
-
-        if df_new.empty:
-            print(f"✅ {symbol}: tất cả dữ liệu mới đã có trong bảng.")
-            return
-
-        # Ghi dữ liệu mới
         df_new.to_sql(table_name, engine, if_exists='append', index=False)
-        print(f"✅ {symbol}: đã thêm {len(df_new)} dòng mới (đến {df_new['time'].max().strftime('%Y-%m-%d')})")
-
+        print(f"✅ {symbol}: đã thêm {len(df_new)} dòng mới.")
     except Exception as e:
-        print(f"❌ Lỗi khi cập nhật {symbol}: {e}")
+        print(f"⚠️ Bỏ qua {symbol}: {e}")
 
-# Chạy cập nhật cho 10 mã đầu
-try:
-    # Lấy danh sách 10 mã đầu tiên trong bảng
-    df_symbols = pd.read_sql(f"SELECT DISTINCT symbol FROM {table_name} ORDER BY symbol ASC LIMIT 10", engine)
-    symbols = df_symbols['symbol'].tolist()
 
-    print(f"\n🚀 Bắt đầu cập nhật dữ liệu cho {len(symbols)} mã đầu tiên...")
-    for symbol in symbols:
+def run_update_all_symbols():
+    """Chạy toàn bộ quy trình cập nhật."""
+    engine = create_engine(conn_str)
+
+    all_symbols = get_all_symbols_today()
+
+    try:
+        df_existing = pd.read_sql(f"SELECT DISTINCT symbol FROM {table_name}", engine)
+        existing_symbols = df_existing['symbol'].tolist()
+    except Exception:
+        existing_symbols = []
+        print("⚠️ Bảng trống hoặc chưa tồn tại, sẽ tạo mới toàn bộ.")
+
+    new_symbols = [s for s in all_symbols if s not in existing_symbols]
+    print(f"🆕 Có {len(new_symbols)} mã mới cần thêm.")
+    all_to_update = sorted(set(existing_symbols + new_symbols))
+    print(f"🚀 Tổng cộng {len(all_to_update)} mã sẽ được cập nhật.")
+
+    for symbol in all_to_update:
         update_stock_price_nearest_to_postgres(symbol, table_name, engine)
 
-    print("\n🎯 Hoàn tất cập nhật tất cả mã.")
-except Exception as e:
-    print(f"❌ Lỗi tổng khi lấy danh sách mã: {e}")
+    print("🎯 Hoàn tất cập nhật toàn bộ.")
+
+
+# ======================
+# MAIN
+# ======================
+if __name__ == "__main__":
+    run_update_all_symbols()
