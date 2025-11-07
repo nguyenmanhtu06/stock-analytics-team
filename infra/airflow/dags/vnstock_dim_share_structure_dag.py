@@ -5,6 +5,8 @@ import time
 from vnstock import Company
 import pandas as pd
 import warnings
+import os
+from sqlalchemy import create_engine
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
@@ -14,6 +16,16 @@ default_args = {
     'retries': 2,
     'retry_delay': timedelta(minutes=5)
 }
+
+# ==== Đọc biến môi trường DB dành cho dim_share_structure ====
+postgres_host = os.getenv("POSTGRES_HOST", "postgres_data")
+postgres_port = os.getenv("POSTGRES_PORT", "5432")
+postgres_user = os.getenv("POSTGRES_USER", "admin")
+postgres_password = os.getenv("POSTGRES_PASSWORD", "admin123")
+postgres_db = os.getenv("POSTGRES_DB", "vnstock")
+
+conn_str = f"postgresql+psycopg2://{postgres_user}:{postgres_password}@{postgres_host}:{postgres_port}/{postgres_db}"
+table_name = "dim_share_structure"
 
 def get_value_safe(data, key):
     val = data.get(key, None)
@@ -71,8 +83,8 @@ def get_dim_share_structure_batch(batch_symbols, stockid_dict):
 
 def get_dim_share_structure_from_stock(
     dim_stock_path='/opt/airflow/data/dim_stock.csv',
-    save_path='/opt/airflow/data/dim_share_structure.csv',
-    batch_size=50, **kwargs
+    batch_size=50,
+    **kwargs
 ):
     df_stock = pd.read_csv(dim_stock_path, encoding='utf-8-sig')
     symbols = df_stock['symbol'].tolist()
@@ -89,19 +101,23 @@ def get_dim_share_structure_from_stock(
         row['share_id'] = i + 1
 
     dim_share_structure = pd.DataFrame(all_rows)
-    # Định dạng số đẹp hơn khi lưu file
-    dim_share_structure['issue_share'] = dim_share_structure['issue_share'].apply(lambda x: '{:,.0f}'.format(x) if pd.notna(x) and x is not None else '')
-    dim_share_structure['charter_capital'] = dim_share_structure['charter_capital'].apply(lambda x: '{:,.0f}'.format(x) if pd.notna(x) and x is not None else '')
-    dim_share_structure['financial_ratio_issue_share'] = dim_share_structure['financial_ratio_issue_share'].apply(lambda x: '{:.4f}'.format(x) if pd.notna(x) and x is not None else '')
 
-    dim_share_structure.to_csv(save_path, index=False, encoding='utf-8-sig', lineterminator='\n', quoting=1)
-    print(f"Đã lưu file CSV: {save_path}")
+    # Định dạng số đẹp hơn trước khi lưu db (để kiểu số, không format chuỗi), giữ kiểu float/int:
+    dim_share_structure['issue_share'] = pd.to_numeric(dim_share_structure['issue_share'], errors='coerce')
+    dim_share_structure['charter_capital'] = pd.to_numeric(dim_share_structure['charter_capital'], errors='coerce')
+    dim_share_structure['financial_ratio_issue_share'] = pd.to_numeric(dim_share_structure['financial_ratio_issue_share'], errors='coerce')
+
+    # Kết nối và lưu vào DB:
+    engine = create_engine(conn_str)
+    dim_share_structure.to_sql(table_name, engine, if_exists='replace', index=False)
+    print(f"Đã lưu data vào bảng '{table_name}' trong DB.")
+
     return dim_share_structure
 
 with DAG(
     'vnstock_dim_share_structure_weekly',
     default_args=default_args,
-    description='Weekly update dim_share_structure from vnstock',
+    description='Weekly update dim_share_structure from vnstock to DB',
     schedule_interval='@weekly',
     start_date=datetime(2025, 11, 6),
     catchup=False,
@@ -112,7 +128,6 @@ with DAG(
         python_callable=get_dim_share_structure_from_stock,
         op_kwargs={
             'dim_stock_path': '/opt/airflow/data/dim_stock.csv',
-            'save_path': '/opt/airflow/data/dim_share_structure.csv',
             'batch_size': 50
         }
     )

@@ -35,10 +35,14 @@ services:
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/data:/opt/airflow/data
+      - ./requirements.txt:/requirements.txt
     command: >
-      bash -c "airflow db upgrade &&
-               airflow users create --username admin --password admin --firstname admin --lastname user --role Admin --email admin@example.com || true &&
-               airflow webserver & airflow scheduler"
+      bash -c "
+          pip install --no-cache-dir -r /requirements.txt && 
+          airflow db upgrade &&
+          airflow users create --username admin --password admin --firstname admin --lastname user --role Admin --email admin@example.com || true &&
+          airflow webserver & airflow scheduler
+      "
     ports:
       - "8080:8080"
     depends_on:
